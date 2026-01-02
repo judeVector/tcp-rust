@@ -30,7 +30,8 @@ This project implements the core TCP protocol following RFC 793 specifications. 
 ## Usage
 ```bash
 # Run with appropriate permissions (requires root/sudo for TUN device creation)
-sudo cargo run
+# Better to run the shell command ./run.sh
+/run.sh
 ```
 
 ## Project Structure
