@@ -15,11 +15,13 @@ struct Quad {
 fn main() -> io::Result<()> {
     let mut iface =
         Iface::without_packet_info("tun0", Mode::Tun).expect("failed to create TUN device");
-    let mut buf = vec![0u8; 1504];
+    let mut buf = [0u8; 1504];
     let mut connections: HashMap<Quad, tcp::Connection> = Default::default();
 
     loop {
         let nbytes = iface.recv(&mut buf)?;
+        // if s/without_packet_info/new/:
+        //
         // let _eth_flags = u16::from_be_bytes([buf[1], buf[2]]);
         // let eth_proto = u16::from_be_bytes([buf[2], buf[3]]);
 
@@ -27,6 +29,8 @@ fn main() -> io::Result<()> {
         //     // not ipv4
         //     continue;
         // }
+        //
+        // and also include on send
 
         match Ipv4HeaderSlice::from_slice(&buf[..nbytes]) {
             Ok(ip_header) => {

@@ -6,13 +6,14 @@ pub enum State {
     Closed,
     Listen,
     SynRcvd,
-    // Estab,
+    Estab,
 }
 
 pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: ReceiveSequenceSpace,
+    ip: Ipv4Header,
 }
 
 /// State of the Send Sequence Space (RFC 793 S3.2)
@@ -91,7 +92,7 @@ impl Connection {
         }
 
         let iss = 0;
-        let connection = Connection {
+        let mut connection = Connection {
             state: State::SynRcvd,
             send: SendSequenceSpace {
                 iss: iss,
@@ -108,6 +109,24 @@ impl Connection {
                 up: false,
                 irs: tcp_header.sequence_number(),
             },
+            ip: Ipv4Header::new(
+                0,
+                64,
+                IpNumber::TCP,
+                [
+                    ip_header.destination()[0],
+                    ip_header.destination()[1],
+                    ip_header.destination()[2],
+                    ip_header.destination()[3],
+                ],
+                [
+                    ip_header.source()[0],
+                    ip_header.source()[1],
+                    ip_header.source()[2],
+                    ip_header.source()[3],
+                ],
+            )
+            .unwrap(),
         };
 
         // need to start establishing a connection
@@ -121,25 +140,7 @@ impl Connection {
         syn_ack.acknowledgment_number = connection.recv.nxt;
         syn_ack.syn = true;
         syn_ack.ack = true;
-
-        let ip = Ipv4Header::new(
-            syn_ack.header_len_u16(),
-            64,
-            IpNumber::TCP,
-            [
-                ip_header.destination()[0],
-                ip_header.destination()[1],
-                ip_header.destination()[2],
-                ip_header.destination()[3],
-            ],
-            [
-                ip_header.source()[0],
-                ip_header.source()[1],
-                ip_header.source()[2],
-                ip_header.source()[3],
-            ],
-        )
-        .unwrap();
+        connection.ip.set_payload_len(syn_ack.header_len() + 0);
 
         // kernel does this for us so we dont need it
         // syn_ack.checksum = syn_ack
@@ -149,7 +150,7 @@ impl Connection {
         // write out the headers
         let unwritten = {
             let mut unwritten = &mut buf[..];
-            ip.write(&mut unwritten)?;
+            connection.ip.write(&mut unwritten)?;
             syn_ack.write(&mut unwritten)?;
             unwritten.len()
         };
@@ -165,7 +166,37 @@ impl Connection {
         tcp_header: &TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<()> {
-        // Implement the logic for handling the packet here.
-        Ok(())
+        // acceptable ack check
+        // SND.UNA < SEG.ACK =< SND.NXT
+        let ackn = tcp_header.acknowledgment_number();
+        if self.send.una < ackn {
+            // check is violated if and only if n is between u and a
+            if self.send.nxt >= self.send.una && self.send.nxt < ackn {
+                return Ok(());
+            } else {
+                // check is okay if and only if n is between u and a
+                if self.send.nxt >= ackn && self.send.nxt < self.send.una {
+                } else {
+                    return Ok(());
+                }
+            }
+        }
+
+        if !(self.send.una < tcp_header.acknowledgment_number()
+            && tcp_header.acknowledgment_number() <= self.send.nxt)
+        {
+            return Ok(());
+        }
+    }
+
+        match self.state {
+            State::SynRcvd => {
+                // expect to get an ACK for our SYN
+                unimplemented!()
+            }
+            State::Estab => {
+                unimplemented!()
+            }
+        }
     }
 }
