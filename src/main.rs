@@ -59,14 +59,14 @@ fn main() -> io::Result<()> {
                                 &buf[datai..nbytes],
                             )?,
                             Entry::Vacant(e) => {
-                                if let Some(c) = tcp::Connection::accept(
+                                if let Some(connection) = tcp::Connection::accept(
                                     // &mut self,
                                     &mut iface,
                                     &ip_header,
                                     &tcp_header,
                                     &buf[datai..nbytes],
                                 )? {
-                                    e.insert(c);
+                                    e.insert(connection);
                                 }
                             }
                         }

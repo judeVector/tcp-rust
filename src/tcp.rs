@@ -1,5 +1,5 @@
 use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
-use std::io;
+use std::{io, usize};
 use tun_tap::Iface;
 
 pub enum State {
@@ -77,6 +77,17 @@ struct ReceiveSequenceSpace {
 // }
 
 impl Connection {
+    /// ## `accept()` — The SYN Handshake
+
+    /// TCP connections start with a **3-way handshake**:
+    /// ```
+    /// Client                    Server (We)
+    ///   |                           |
+    ///   |-------- SYN ------------->|   "I want to connect, my seq starts at X"
+    ///   |                           |
+    ///   |<------- SYN-ACK ----------|   "OK, my seq starts at Y, I got your X"
+    ///   |                           |
+    ///   |-------- ACK ------------->|   "Got it, we're connected"
     pub fn accept<'a>(
         // &mut self,
         iface: &mut Iface,
@@ -87,27 +98,26 @@ impl Connection {
         let mut buf = [0u8; 1500];
 
         if !tcp_header.syn() {
-            // only expect SYN packet
-            return Ok(None);
+            return Ok(None); // only accept SYN packets for new connections
         }
 
-        let iss = 0;
+        let iss = 0; // initial sequence number (should be random in real TCP)
         let mut connection = Connection {
             state: State::SynRcvd,
             send: SendSequenceSpace {
-                iss: iss,
-                una: iss,
-                nxt: iss + 1,
+                iss: iss,     // Our starting seq = 0
+                una: iss,     // Nothing acknowledged yet
+                nxt: iss + 1, // +1 because we're about to send a SYN (which consumes one)
                 wnd: 10,
                 up: false,
                 wll: 0,
                 wl2: 0,
             },
             recv: ReceiveSequenceSpace {
-                nxt: tcp_header.sequence_number() + 1,
+                nxt: tcp_header.sequence_number() + 1, // +1 because SYN consumes one seq number
                 wnd: tcp_header.window_size(),
                 up: false,
-                irs: tcp_header.sequence_number(),
+                irs: tcp_header.sequence_number(), // Their starting seq number
             },
             ip: Ipv4Header::new(
                 0,
@@ -129,15 +139,16 @@ impl Connection {
             .unwrap(),
         };
 
+        // Here we build the SYN-ACK response:
         // need to start establishing a connection
         let mut syn_ack = TcpHeader::new(
-            tcp_header.destination_port(),
-            tcp_header.source_port(),
-            connection.send.iss,
-            connection.send.wnd,
+            tcp_header.destination_port(), // From OUR port
+            tcp_header.source_port(),      // To THEIR port
+            connection.send.iss,           // Our sequence number
+            connection.send.wnd,           // Our window size
         );
 
-        syn_ack.acknowledgment_number = connection.recv.nxt;
+        syn_ack.acknowledgment_number = connection.recv.nxt; // "I got up to your byte X"
         syn_ack.syn = true;
         syn_ack.ack = true;
         connection.ip.set_payload_len(syn_ack.header_len() + 0);
@@ -159,36 +170,53 @@ impl Connection {
         Ok(Some(connection))
     }
 
+    /// ## `on_packet()` — The ACK Validation
+    /// This is called for **packets on an existing connection**.
+    /// The first thing it does is validate the ACK number.
+    ///
+    /// **The rule from RFC 793:**
+    /// > `SND.UNA < SEG.ACK <= SND.NXT`
+    /// ```
+    ///          valid ACK range
+    ///               ↓↓↓↓↓
+    /// |--acknowledged--|--in-flight--|--not-sent-yet--|
+    ///               SND.UNA       SND.NXT
     pub fn on_packet<'a>(
-        &mut self, // mutable reference to the instance
+        &mut self,
         iface: &mut Iface,
         ip_header: &Ipv4HeaderSlice<'a>,
         tcp_header: &TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<()> {
+        // first check that sequence numbers are valid (RFC 793 S3.3)
+        //
         // acceptable ack check
         // SND.UNA < SEG.ACK =< SND.NXT
+        // but remember wrapping
+        //
         let ackn = tcp_header.acknowledgment_number();
         if self.send.una < ackn {
             // check is violated if and only if n is between u and a
             if self.send.nxt >= self.send.una && self.send.nxt < ackn {
                 return Ok(());
+            }
+        } else {
+            // check is okay if and only if n is between u and a
+            if self.send.nxt >= ackn && self.send.nxt < self.send.una {
             } else {
-                // check is okay if and only if n is between u and a
-                if self.send.nxt >= ackn && self.send.nxt < self.send.una {
-                } else {
-                    return Ok(());
-                }
+                return Ok(());
             }
         }
 
-        if !(self.send.una < tcp_header.acknowledgment_number()
-            && tcp_header.acknowledgment_number() <= self.send.nxt)
-        {
-            return Ok(());
-        }
-    }
+        // if !(self.send.una < tcp_header.acknowledgment_number()
+        //     && tcp_header.acknowledgment_number() <= self.send.nxt)
+        // {
+        //     return Ok(());
+        // }
 
+        //
+        // valid segment check
+        //
         match self.state {
             State::SynRcvd => {
                 // expect to get an ACK for our SYN
@@ -196,6 +224,63 @@ impl Connection {
             }
             State::Estab => {
                 unimplemented!()
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn in_between_wrapped(start: usize, x: usize, end: usize) -> bool {
+    use std::cmp::{Ord, Ordering};
+
+    match start.cmp(&x) {
+        Ordering::Equal => return false,
+        Ordering::Less => {
+            // we have:
+            //
+            //       0 |-----------------S----------X-------------------------| (wraparound)
+            //
+            //  X is between S and E (S < X < E) in these cases:
+            //
+            //       0 |-----------------S----------X------E-------------------| (wraparound)
+            //
+            //       0 |-----------------E----------S------X-------------------| (wraparound)
+            //
+            //  but "not" in these cases
+            //
+            //       0 |-----------------S----------E------X-------------------| (wraparound)
+            //
+            //       0 |-----------------|----------X------E-------------------| (wraparound)
+            //                         ^-S+E
+            //       0 |-----------------S----------|------------------------| (wraparound)
+            //                                 X+E^
+            // or in other words, iff !(S <= E <= X)
+            if end >= start && end <= x {
+                return false;
+            }
+        }
+        Ordering::Greater => {
+            // we have:
+            //
+            //       0 |-----------------X----------S-------------------------| (wraparound)
+            //
+            //  X is between S and E (S < X < E) only in these cases:
+            //
+            //       0 |-----------------X--E---S------------------------------| (wraparound)
+            //
+            //  but "not" in these cases
+            //
+            //       0 |-----------------S----------E------X-------------------| (wraparound)
+            //
+            //       0 |-----------------|----------X------E-------------------| (wraparound)
+            //                         ^-S+E
+            //       0 |-----------------S----------|------------------------| (wraparound)
+            //                                 X+E^
+            // or in other words, iff !(S <= E <= X)
+            if self.send.nxt >= ackn && self.send.nxt < self.send.una {
+            } else {
+                return false;
             }
         }
     }
