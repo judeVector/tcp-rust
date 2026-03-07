@@ -195,8 +195,22 @@ impl Connection {
         // but remember wrapping
         //
         let ackn = tcp_header.acknowledgment_number();
+        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+            return Ok(());
+        }
 
-        if !is_be
+        // valid segment check
+        // RCV.NXT =< SEG.ACK =< SND.NXT
+        // but remember wrapping
+
+        let seqn = tcp_header.sequence_number();
+        if !is_between_wrapped(
+            self.recv.nxt.wrapping_sub(1),
+            seqn,
+            self.recv.nxt.wrapping_add(self.recv.wnd as u32),
+        ) {
+            return Ok(());
+        }
 
         if self.send.una < ackn {
             // check is violated if and only if n is between u and a
@@ -234,7 +248,7 @@ impl Connection {
     }
 }
 
-fn is_between_wrapped(start: usize, x: usize, end: usize) -> bool {
+fn is_between_wrapped(start: u32, x: u32, end: u32) -> bool {
     use std::cmp::{Ord, Ordering};
 
     match start.cmp(&x) {
