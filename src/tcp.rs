@@ -261,7 +261,7 @@ fn in_between_wrapped(start: usize, x: usize, end: usize) -> bool {
             }
         }
         Ordering::Greater => {
-            // we have:
+            // we have the opposite of above:
             //
             //       0 |-----------------X----------S-------------------------| (wraparound)
             //
@@ -271,17 +271,20 @@ fn in_between_wrapped(start: usize, x: usize, end: usize) -> bool {
             //
             //  but "not" in these cases
             //
-            //       0 |-----------------S----------E------X-------------------| (wraparound)
+            //       0 |-----------------X----------S------E-------------------| (wraparound)
+            //
+            //       0 |-----------------E----X------S------------------------| (wraparound)
             //
             //       0 |-----------------|----------X------E-------------------| (wraparound)
-            //                         ^-S+E
-            //       0 |-----------------S----------|------------------------| (wraparound)
-            //                                 X+E^
-            // or in other words, iff !(S <= E <= X)
-            if self.send.nxt >= ackn && self.send.nxt < self.send.una {
+            //                         ^-X+E
+            //       0 |-----------------X----------|------------------------| (wraparound)
+            //                                 S+E^
+            // or in other words, iff !(S < E < X)
+            if end < start && end > x {
             } else {
                 return false;
             }
         }
     }
+    true
 }
