@@ -195,6 +195,9 @@ impl Connection {
         // but remember wrapping
         //
         let ackn = tcp_header.acknowledgment_number();
+
+        if !is_be
+
         if self.send.una < ackn {
             // check is violated if and only if n is between u and a
             if self.send.nxt >= self.send.una && self.send.nxt < ackn {
@@ -231,7 +234,7 @@ impl Connection {
     }
 }
 
-fn in_between_wrapped(start: usize, x: usize, end: usize) -> bool {
+fn is_between_wrapped(start: usize, x: usize, end: usize) -> bool {
     use std::cmp::{Ord, Ordering};
 
     match start.cmp(&x) {
