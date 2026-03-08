@@ -199,17 +199,36 @@ impl Connection {
             return Ok(());
         }
 
-        // valid segment check
-        // RCV.NXT =< SEG.ACK =< SND.NXT
-        // but remember wrapping
+        // valid segment check, okay if it acks at least one byte, which means that at least one
+        // of the following is true
+        //
+        // RCV.NXT =< SEG.SEQN =< RCV.NXT+RCV.WND
+        // RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
 
         let seqn = tcp_header.sequence_number();
-        if !is_between_wrapped(
-            self.recv.nxt.wrapping_sub(1),
-            seqn,
-            self.recv.nxt.wrapping_add(self.recv.wnd as u32),
-        ) {
-            return Ok(());
+        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
+
+        if data.len() == 0 && !tcp_header.syn() && !tcp_header.fin() {
+            // zero-length segment has seperate rules for acceptance
+            if self.recv.wnd == 0 {
+                if seqn != self.recv.nxt {
+                    return Ok(());
+                }
+            } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend) {
+                return Ok(());
+            }
+        } else {
+            if self.recv.wnd == 0 {
+                return Ok(());
+            } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
+                && !is_between_wrapped(
+                    self.recv.nxt.wrapping_sub(1),
+                    seqn + data.len() as u32 - 1,
+                    wend,
+                )
+            {
+                return Ok(());
+            }
         }
 
         if self.send.una < ackn {
