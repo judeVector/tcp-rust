@@ -8,12 +8,23 @@ pub enum State {
     SynRcvd,
     Estab,
 }
+impl State {
+    fn is_non_synchronized(&self) -> bool {
+        match *self {
+            State::SynRcvd => false,
+            State::Estab => true,
+            State::Closed => false,
+            State::Listen => true,
+        }
+    }
+}
 
 pub struct Connection {
     state: State,
     send: SendSequenceSpace,
     recv: ReceiveSequenceSpace,
     ip: Ipv4Header,
+    tcp: TcpHeader,
 }
 
 /// State of the Send Sequence Space (RFC 793 S3.2)
@@ -77,6 +88,10 @@ struct ReceiveSequenceSpace {
 // }
 
 impl Connection {
+    pub fn send_rst<'a>(&mut self, nic: &mut Iface) -> io::Result<()> {
+        Ok(())
+    }
+
     /// ## `accept()` — The SYN Handshake
 
     /// TCP connections start with a **3-way handshake**:
@@ -102,13 +117,14 @@ impl Connection {
         }
 
         let iss = 0; // initial sequence number (should be random in real TCP)
+        let wnd = 10;
         let mut connection = Connection {
             state: State::SynRcvd,
             send: SendSequenceSpace {
                 iss: iss,     // Our starting seq = 0
                 una: iss,     // Nothing acknowledged yet
                 nxt: iss + 1, // +1 because we're about to send a SYN (which consumes one)
-                wnd: 10,
+                wnd: wnd,
                 up: false,
                 wll: 0,
                 wl2: 0,
@@ -137,16 +153,22 @@ impl Connection {
                 ],
             )
             .unwrap(),
+            tcp: TcpHeader::new(
+                tcp_header.destination_port(), // From OUR port
+                tcp_header.source_port(),      // To THEIR port
+                iss,                           // Our sequence number
+                wnd,                           // Our window size
+            ),
         };
 
         // Here we build the SYN-ACK response:
         // need to start establishing a connection
-        let mut syn_ack = TcpHeader::new(
-            tcp_header.destination_port(), // From OUR port
-            tcp_header.source_port(),      // To THEIR port
-            connection.send.iss,           // Our sequence number
-            connection.send.wnd,           // Our window size
-        );
+        // let mut syn_ack = TcpHeader::new(
+        //     tcp_header.destination_port(), // From OUR port
+        //     tcp_header.source_port(),      // To THEIR port
+        //     connection.send.iss,           // Our sequence number
+        //     connection.send.wnd,           // Our window size
+        // );
 
         syn_ack.acknowledgment_number = connection.recv.nxt; // "I got up to your byte X"
         syn_ack.syn = true;
@@ -196,6 +218,10 @@ impl Connection {
         //
         let ackn = tcp_header.acknowledgment_number();
         if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+            if !self.state.is_non_synchronized() {
+                // according to Reset Generation, we should send a RST
+                self.send_rst(nic);
+            }
             return Ok(());
         }
 
@@ -206,7 +232,7 @@ impl Connection {
         // RCV.NXT =< SEG.SEQ+SEG.LEN-1 < RCV.NXT+RCV.WND
 
         let seqn = tcp_header.sequence_number();
-        let mut slen = data.len();
+        let mut slen = data.len() as u32;
         if tcp_header.fin() {
             slen += 1;
         };
@@ -215,7 +241,7 @@ impl Connection {
         }
         let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
 
-        if data.len() == 0 && !tcp_header.syn() && !tcp_header.fin() {
+        if slen == 0 {
             // zero-length segment has seperate rules for acceptance
             if self.recv.wnd == 0 {
                 if seqn != self.recv.nxt {
@@ -228,11 +254,7 @@ impl Connection {
             if self.recv.wnd == 0 {
                 return Ok(());
             } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
-                && !is_between_wrapped(
-                    self.recv.nxt.wrapping_sub(1),
-                    seqn + data.len() as u32 - 1,
-                    wend,
-                )
+                && !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1, wend)
             {
                 return Ok(());
             }
@@ -263,7 +285,14 @@ impl Connection {
         match self.state {
             State::SynRcvd => {
                 // expect to get an ACK for our SYN
-                unimplemented!()
+                if !tcp_header.ack() {
+                    return Ok(());
+                }
+                // must have ACKed our SYN, since we detected at least one acked byte, and we have
+                // only sent one byte (the SYN)
+                self.state = Estab;
+
+                // now lets terminate the connection
             }
             State::Estab => {
                 unimplemented!()
