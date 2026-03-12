@@ -1,5 +1,5 @@
 use etherparse::{IpNumber, Ipv4Header, Ipv4HeaderSlice, TcpHeader, TcpHeaderSlice};
-use std::{io, usize};
+use std::io;
 use tun_tap::Iface;
 
 pub enum State {
@@ -88,10 +88,6 @@ struct ReceiveSequenceSpace {
 // }
 
 impl Connection {
-    pub fn send_rst<'a>(&mut self, nic: &mut Iface) -> io::Result<()> {
-        Ok(())
-    }
-
     /// ## `accept()` — The SYN Handshake
 
     /// TCP connections start with a **3-way handshake**:
@@ -104,13 +100,13 @@ impl Connection {
     ///   |                           |
     ///   |-------- ACK ------------->|   "Got it, we're connected"
     pub fn accept<'a>(
-        // &mut self,
+        &mut self,
         iface: &mut Iface,
         ip_header: &Ipv4HeaderSlice<'a>,
         tcp_header: &TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<Option<Self>> {
-        let mut buf = [0u8; 1500];
+        let buf = [0u8; 1500];
 
         if !tcp_header.syn() {
             return Ok(None); // only accept SYN packets for new connections
@@ -121,9 +117,9 @@ impl Connection {
         let mut connection = Connection {
             state: State::SynRcvd,
             send: SendSequenceSpace {
-                iss: iss,     // Our starting seq = 0
-                una: iss,     // Nothing acknowledged yet
-                nxt: iss + 1, // +1 because we're about to send a SYN (which consumes one)
+                iss: iss, // Our starting seq = 0
+                una: iss, // Nothing acknowledged yet
+                nxt: iss, // We haven't written the syn byte yet
                 wnd: wnd,
                 up: false,
                 wll: 0,
@@ -153,6 +149,7 @@ impl Connection {
                 ],
             )
             .unwrap(),
+            // Here we build the SYN-ACK response:
             tcp: TcpHeader::new(
                 tcp_header.destination_port(), // From OUR port
                 tcp_header.source_port(),      // To THEIR port
@@ -161,35 +158,77 @@ impl Connection {
             ),
         };
 
-        // Here we build the SYN-ACK response:
-        // need to start establishing a connection
-        // let mut syn_ack = TcpHeader::new(
-        //     tcp_header.destination_port(), // From OUR port
-        //     tcp_header.source_port(),      // To THEIR port
-        //     connection.send.iss,           // Our sequence number
-        //     connection.send.wnd,           // Our window size
-        // );
+        // syn_ack.acknowledgment_number = connection.recv.nxt; // "I got up to your byte X"
+        self.tcp.syn = true;
+        self.tcp.ack = true;
+        connection.write(iface, &[])?;
 
-        syn_ack.acknowledgment_number = connection.recv.nxt; // "I got up to your byte X"
-        syn_ack.syn = true;
-        syn_ack.ack = true;
-        connection.ip.set_payload_len(syn_ack.header_len() + 0);
+        Ok(Some(connection))
+    }
+
+    fn write(&mut self, iface: &mut Iface, payload: &[u8]) -> io::Result<usize> {
+        let mut buf = [0u8; 1500];
+
+        self.tcp.sequence_number = self.send.nxt;
+        self.tcp.acknowledgment_number = self.recv.nxt; // "I got up to your byte X"
+
+        let size = std::cmp::min(
+            buf.len(),
+            self.tcp.header_len() + self.ip.header_len() + payload.len(),
+        );
+        self.ip.set_payload_len(size);
 
         // kernel does this for us so we dont need it
-        // syn_ack.checksum = syn_ack
-        //     .calc_checksum_ipv4(&ip, &[])
+        // self.tcp.checksum = self.tcp
+        //     .calc_checksum_ipv4(&self.ip, &[])
         //     .expect("failed to compute checksum");
 
         // write out the headers
-        let unwritten = {
-            let mut unwritten = &mut buf[..];
-            connection.ip.write(&mut unwritten)?;
-            syn_ack.write(&mut unwritten)?;
-            unwritten.len()
-        };
+        use std::io::Write;
 
-        iface.send(&buf[..unwritten])?;
-        Ok(Some(connection))
+        let mut unwritten = &mut buf[..];
+        self.ip.write(&mut unwritten)?;
+        self.tcp.write(&mut unwritten)?;
+        let payload_bytes = unwritten.write(payload)?;
+        let unwritten = unwritten.len();
+        self.send.nxt.wrapping_add(payload_bytes as u32);
+
+        if self.tcp.syn {
+            self.send.nxt += self.send.nxt.wrapping_add(1);
+            self.tcp.syn = false;
+        }
+
+        if self.tcp.fin {
+            self.send.nxt += self.send.nxt.wrapping_add(1);
+            self.tcp.fin = false;
+        }
+        iface.send(&buf[..buf.len() - unwritten])?;
+
+        Ok(payload_bytes)
+    }
+
+    fn send_rst(&mut self, nic: &mut Iface) -> io::Result<()> {
+        self.tcp.rst = true;
+        // TODO: fix sequence number
+        // If the incoming segment has an ACK field, the reset takes its
+        // sequence number from the ACK field of the segment, otherwise the
+        // reset has sequence number zero and the ACK field is set to the sum
+        // of the sequence number and segment length of the incoming segment.
+        // The connection remains in the same state.
+        //
+        // TODO: handle synchronized RST
+        // If the connection is in a synchronized state (ESTABLISHED,
+        // FIN-WAIT-1, FIN-WAIT-2, CLOSE-WAIT, CLOSING, LAST-ACK, TIME-WAIT),
+        // any unacceptable segment (out of window sequence number or
+        // unacceptible acknowledgment number) must elicit only an empty
+        // acknowledgment segment containing the current send-sequence number
+        // and an acknowledgment indicating the next sequence number expected
+        // to be received, and the connection remains in the same state.
+        self.tcp.sequence_number = 0;
+        self.tcp.acknowledgment_number = 0;
+        self.write(nic, &[])?;
+
+        Ok(())
     }
 
     /// ## `on_packet()` — The ACK Validation
@@ -220,7 +259,8 @@ impl Connection {
         if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
             if !self.state.is_non_synchronized() {
                 // according to Reset Generation, we should send a RST
-                self.send_rst(nic);
+
+                self.send_rst(iface);
             }
             return Ok(());
         }
@@ -290,7 +330,7 @@ impl Connection {
                 }
                 // must have ACKed our SYN, since we detected at least one acked byte, and we have
                 // only sent one byte (the SYN)
-                self.state = Estab;
+                self.state = State::Estab;
 
                 // now lets terminate the connection
             }

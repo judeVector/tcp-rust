@@ -60,7 +60,7 @@ fn main() -> io::Result<()> {
                             )?,
                             Entry::Vacant(e) => {
                                 if let Some(connection) = tcp::Connection::accept(
-                                    // &mut self,
+                                    &mut self,
                                     &mut iface,
                                     &ip_header,
                                     &tcp_header,
