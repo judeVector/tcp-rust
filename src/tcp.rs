@@ -3,18 +3,20 @@ use std::io;
 use tun_tap::Iface;
 
 pub enum State {
-    Closed,
-    Listen,
+    // Closed,
+    // Listen,
     SynRcvd,
     Estab,
+    FinWait1,
+    FinWait2,
 }
 impl State {
     fn is_non_synchronized(&self) -> bool {
         match *self {
             State::SynRcvd => false,
-            State::Estab => true,
-            State::Closed => false,
-            State::Listen => true,
+            State::Estab | State::FinWait1 | State::FinWait2 => true,
+            // State::Closed => false,
+            // State::Listen => true,
         }
     }
 }
@@ -106,8 +108,6 @@ impl Connection {
         tcp_header: &TcpHeaderSlice<'a>,
         data: &'a [u8],
     ) -> io::Result<Option<Self>> {
-        let buf = [0u8; 1500];
-
         if !tcp_header.syn() {
             return Ok(None); // only accept SYN packets for new connections
         }
@@ -265,6 +265,8 @@ impl Connection {
             return Ok(());
         }
 
+        self.send.una = ackn;
+
         // valid segment check, okay if it acks at least one byte, which means that at least one
         // of the following is true
         //
@@ -279,8 +281,8 @@ impl Connection {
         if tcp_header.syn() {
             slen + 1;
         }
-        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
 
+        let wend = self.recv.nxt.wrapping_add(self.recv.wnd as u32);
         if slen == 0 {
             // zero-length segment has seperate rules for acceptance
             if self.recv.wnd == 0 {
@@ -294,30 +296,36 @@ impl Connection {
             if self.recv.wnd == 0 {
                 return Ok(());
             } else if !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn, wend)
-                && !is_between_wrapped(self.recv.nxt.wrapping_sub(1), seqn + slen - 1, wend)
+                && !is_between_wrapped(
+                    self.recv.nxt.wrapping_sub(1),
+                    seqn.wrapping_add(slen - 1),
+                    wend,
+                )
             {
                 return Ok(());
             }
         }
 
-        if self.send.una < ackn {
-            // check is violated if and only if n is between u and a
-            if self.send.nxt >= self.send.una && self.send.nxt < ackn {
-                return Ok(());
-            }
-        } else {
-            // check is okay if and only if n is between u and a
-            if self.send.nxt >= ackn && self.send.nxt < self.send.una {
-            } else {
-                return Ok(());
-            }
-        }
+        // if self.send.una < ackn {
+        //     // check is violated if and only if n is between u and a
+        //     if self.send.nxt >= self.send.una && self.send.nxt < ackn {
+        //         return Ok(());
+        //     }
+        // } else {
+        //     // check is okay if and only if n is between u and a
+        //     if self.send.nxt >= ackn && self.send.nxt < self.send.una {
+        //     } else {
+        //         return Ok(());
+        //     }
+        // }
 
         // if !(self.send.una < tcp_header.acknowledgment_number()
         //     && tcp_header.acknowledgment_number() <= self.send.nxt)
         // {
         //     return Ok(());
         // }
+
+        self.recv.nxt = seqn.wrapping_add(slen);
 
         //
         // valid segment check
@@ -333,9 +341,32 @@ impl Connection {
                 self.state = State::Estab;
 
                 // now lets terminate the connection
+                self.tcp.fin = true;
+                self.write(iface, &[])?;
+                self.state = State::FinWait1;
             }
             State::Estab => {
                 unimplemented!()
+            }
+            State::FinWait1 => {
+                if !tcp_header.fin() || !data.is_empty() {
+                    unimplemented!()
+                }
+
+                // must have ACKed our FIN, since we detected at least one acked byte, and we have
+                // only sent one byte (the FIN)
+                self.state = State::FinWait2
+            }
+            State::FinWait2 => {
+                if !tcp_header.fin() || !data.is_empty() {
+                    unimplemented!()
+                }
+
+                // must have ACKed our FIN, since we detected at least one acked byte, and we have
+                // only sent one byte (the FIN)
+                self.tcp.fin = false;
+                self.write(iface, &[])?;
+                self.state = State::Closing
             }
         }
 
