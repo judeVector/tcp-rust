@@ -102,7 +102,6 @@ impl Connection {
     ///   |                           |
     ///   |-------- ACK ------------->|   "Got it, we're connected"
     pub fn accept<'a>(
-        &mut self,
         iface: &mut Iface,
         ip_header: &Ipv4HeaderSlice<'a>,
         tcp_header: &TcpHeaderSlice<'a>,
@@ -159,8 +158,8 @@ impl Connection {
         };
 
         // syn_ack.acknowledgment_number = connection.recv.nxt; // "I got up to your byte X"
-        self.tcp.syn = true;
-        self.tcp.ack = true;
+        connection.tcp.syn = true;
+        connection.tcp.ack = true;
         connection.write(iface, &[])?;
 
         Ok(Some(connection))
@@ -250,22 +249,6 @@ impl Connection {
         data: &'a [u8],
     ) -> io::Result<()> {
         // first check that sequence numbers are valid (RFC 793 S3.3)
-        //
-        // acceptable ack check
-        // SND.UNA < SEG.ACK =< SND.NXT
-        // but remember wrapping
-        //
-        let ackn = tcp_header.acknowledgment_number();
-        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
-            if !self.state.is_non_synchronized() {
-                // according to Reset Generation, we should send a RST
-
-                self.send_rst(iface);
-            }
-            return Ok(());
-        }
-
-        self.send.una = ackn;
 
         // valid segment check, okay if it acks at least one byte, which means that at least one
         // of the following is true
@@ -326,6 +309,27 @@ impl Connection {
         // }
 
         self.recv.nxt = seqn.wrapping_add(slen);
+        // TODO: if _not_ acceptable , send ACK
+        // <SEQ=SND.NXT><ACK=RCV.NXT>CTL=ACK
+
+        if tcp_header
+
+        //
+        // acceptable ack check
+        // SND.UNA < SEG.ACK =< SND.NXT
+        // but remember wrapping
+        //
+        let ackn = tcp_header.acknowledgment_number();
+        if !is_between_wrapped(self.send.una, ackn, self.send.nxt.wrapping_add(1)) {
+            if !self.state.is_non_synchronized() {
+                // according to Reset Generation, we should send a RST
+
+                self.send_rst(iface);
+            }
+            return Ok(());
+        }
+
+        self.send.una = ackn;
 
         //
         // valid segment check
