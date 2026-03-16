@@ -160,7 +160,7 @@ impl Connection {
         // syn_ack.acknowledgment_number = connection.recv.nxt; // "I got up to your byte X"
         connection.tcp.syn = true;
         connection.tcp.ack = true;
-        connection.write(iface, &[])?;
+        connection.write(iface, data)?;
 
         Ok(Some(connection))
     }
