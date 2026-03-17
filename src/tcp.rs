@@ -312,7 +312,7 @@ impl Connection {
         // TODO: if _not_ acceptable , send ACK
         // <SEQ=SND.NXT><ACK=RCV.NXT>CTL=ACK
 
-        if tcp_header
+        if tcp_header {}
 
         //
         // acceptable ack check
